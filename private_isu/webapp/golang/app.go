@@ -315,22 +315,14 @@ func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
-func getInitialize(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	dbInitialize(ctx)
-
-	// 画像ディレクトリを用意（存在しなければ作成）
+// dumpImages は DB の全画像のうち、ディスクにまだ存在しないものだけをファイルに書き出す。
+// ベースの投稿(1〜10000)の画像は毎回不変なので、2回目以降はほぼ即時に完了する。
+// リクエストのキャンセルに巻き込まれないよう、呼び出し側は context.Background() を渡すこと。
+func dumpImages(ctx context.Context) error {
 	if err := os.MkdirAll(imageDir, 0755); err != nil {
-		log.Print(err)
+		return err
 	}
 
-	// 既存の画像ファイルを一旦削除
-	entries, _ := os.ReadDir(imageDir)
-	for _, e := range entries {
-		os.Remove(imageDir + "/" + e.Name())
-	}
-
-	// DB の全画像をファイルに書き出す
 	type imageRow struct {
 		ID      int    `db:"id"`
 		Mime    string `db:"mime"`
@@ -338,18 +330,33 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 	}
 	var images []imageRow
 	if err := db.SelectContext(ctx, &images, "SELECT `id`, `mime`, `imgdata` FROM `posts`"); err != nil {
-		log.Print(err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return err
 	}
 	for _, img := range images {
 		ext := mimeToExt(img.Mime)
 		if ext == "" {
 			continue
 		}
-		if err := os.WriteFile(fmt.Sprintf("%s/%d.%s", imageDir, img.ID, ext), img.Imgdata, 0644); err != nil {
+		filePath := fmt.Sprintf("%s/%d.%s", imageDir, img.ID, ext)
+		// 既に存在するファイルは書き直さない
+		if _, err := os.Stat(filePath); err == nil {
+			continue
+		}
+		if err := os.WriteFile(filePath, img.Imgdata, 0644); err != nil {
 			log.Print(err)
 		}
+	}
+	return nil
+}
+
+func getInitialize(w http.ResponseWriter, r *http.Request) {
+	dbInitialize(r.Context())
+
+	// 画像の書き出しはリクエストのキャンセルに巻き込まれないよう Background で実行
+	if err := dumpImages(context.Background()); err != nil {
+		log.Print(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
