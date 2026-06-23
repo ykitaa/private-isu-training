@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"crypto/sha512"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -146,21 +147,41 @@ func getSession(r *http.Request) *sessions.Session {
 	return session
 }
 
+func userCacheKey(uid interface{}) string {
+	return fmt.Sprintf("user:%v", uid)
+}
+
+// cacheUser はユーザーを memcached に保存する。
+// users.authority は不変、del_flg はセッションユーザー用途では参照されないため、
+// 明示的な無効化（/initialize の flush・admin/banned の delete）だけで整合する。
+func cacheUser(u User) {
+	b, err := json.Marshal(u)
+	if err != nil {
+		return
+	}
+	memcacheClient.Set(&memcache.Item{Key: userCacheKey(u.ID), Value: b})
+}
+
 func getSessionUser(r *http.Request) User {
-	ctx := r.Context()
 	session := getSession(r)
 	uid, ok := session.Values["user_id"]
 	if !ok || uid == nil {
 		return User{}
 	}
 
-	u := User{}
-
-	err := db.GetContext(ctx, &u, "SELECT * FROM `users` WHERE `id` = ?", uid)
-	if err != nil {
-		return User{}
+	// memcached から取得を試みる（毎リクエストの SELECT users を避ける）
+	if item, err := memcacheClient.Get(userCacheKey(uid)); err == nil {
+		var u User
+		if json.Unmarshal(item.Value, &u) == nil {
+			return u
+		}
 	}
 
+	u := User{}
+	if err := db.GetContext(r.Context(), &u, "SELECT * FROM `users` WHERE `id` = ?", uid); err != nil {
+		return User{}
+	}
+	cacheUser(u)
 	return u
 }
 
@@ -424,6 +445,11 @@ func dumpImages(ctx context.Context) error {
 
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	dbInitialize(r.Context())
+
+	// del_flg がリセットされるため、ユーザーキャッシュ（兼セッション）を全消去して整合させる
+	if err := memcacheClient.FlushAll(); err != nil {
+		log.Print(err)
+	}
 
 	// 画像の書き出しはリクエストのキャンセルに巻き込まれないよう Background で実行
 	if err := dumpImages(context.Background()); err != nil {
@@ -895,6 +921,8 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 
 	for _, id := range r.Form["uid[]"] {
 		db.ExecContext(ctx, query, 1, id)
+		// 該当ユーザーのキャッシュを破棄し、stale な del_flg を残さない
+		memcacheClient.Delete(userCacheKey(id))
 	}
 
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
