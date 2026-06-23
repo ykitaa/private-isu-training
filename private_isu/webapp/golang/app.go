@@ -735,7 +735,9 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(ctx, &results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	// 表示に imgdata(mediumblob) は不要（画像は /image/:id で別配信）。
+	// SELECT * を避けて blob 転送・バッファプール圧迫を防ぐ。
+	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `id` = ?", pid)
 	if err != nil {
 		log.Print(err)
 		return
