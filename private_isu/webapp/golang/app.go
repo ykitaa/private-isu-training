@@ -934,6 +934,8 @@ func main() {
 	}
 	cfg.ParseTime = true
 	cfg.Loc = time.Local
+	// プレースホルダをクライアント側で展開し、毎クエリの PREPARE+EXECUTE 往復を排除する
+	cfg.InterpolateParams = true
 	dsn := cfg.FormatDSN()
 
 	db, err = sqlx.Open("mysql", dsn)
