@@ -319,6 +319,11 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	dbInitialize(ctx)
 
+	// 画像ディレクトリを用意（存在しなければ作成）
+	if err := os.MkdirAll(imageDir, 0755); err != nil {
+		log.Print(err)
+	}
+
 	// 既存の画像ファイルを一旦削除
 	entries, _ := os.ReadDir(imageDir)
 	for _, e := range entries {
