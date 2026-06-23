@@ -16,3 +16,6 @@ go/*
 
 # DBから書き出される画像ファイル（実行時生成物）
 private_isu/webapp/public/image/
+
+# go build がパッケージディレクトリに生成する実行ファイル（ビルド成果物）
+private_isu/webapp/golang/golang
