@@ -323,27 +323,67 @@ func dumpImages(ctx context.Context) error {
 		return err
 	}
 
-	type imageRow struct {
-		ID      int    `db:"id"`
-		Mime    string `db:"mime"`
-		Imgdata []byte `db:"imgdata"`
+	// まず blob を含まない id, mime だけ取得し、ディスクに無いものを洗い出す
+	type meta struct {
+		ID   int    `db:"id"`
+		Mime string `db:"mime"`
 	}
-	var images []imageRow
-	if err := db.SelectContext(ctx, &images, "SELECT `id`, `mime`, `imgdata` FROM `posts`"); err != nil {
+	var metas []meta
+	if err := db.SelectContext(ctx, &metas, "SELECT `id`, `mime` FROM `posts`"); err != nil {
 		return err
 	}
-	for _, img := range images {
-		ext := mimeToExt(img.Mime)
+
+	type missing struct {
+		id   int
+		path string
+	}
+	var missings []missing
+	for _, m := range metas {
+		ext := mimeToExt(m.Mime)
 		if ext == "" {
 			continue
 		}
-		filePath := fmt.Sprintf("%s/%d.%s", imageDir, img.ID, ext)
+		filePath := fmt.Sprintf("%s/%d.%s", imageDir, m.ID, ext)
 		// 既に存在するファイルは書き直さない
 		if _, err := os.Stat(filePath); err == nil {
 			continue
 		}
-		if err := os.WriteFile(filePath, img.Imgdata, 0644); err != nil {
-			log.Print(err)
+		missings = append(missings, missing{id: m.ID, path: filePath})
+	}
+
+	// 不足分の imgdata だけを少数ずつ取得して書き出す（メモリ一括確保を避ける）
+	const batchSize = 100
+	for start := 0; start < len(missings); start += batchSize {
+		end := start + batchSize
+		if end > len(missings) {
+			end = len(missings)
+		}
+		batch := missings[start:end]
+
+		ids := make([]int, len(batch))
+		for i, mi := range batch {
+			ids[i] = mi.id
+		}
+		q, args, err := sqlx.In("SELECT `id`, `imgdata` FROM `posts` WHERE `id` IN (?)", ids)
+		if err != nil {
+			return err
+		}
+		type blobRow struct {
+			ID      int    `db:"id"`
+			Imgdata []byte `db:"imgdata"`
+		}
+		var rows []blobRow
+		if err := db.SelectContext(ctx, &rows, q, args...); err != nil {
+			return err
+		}
+		pathByID := make(map[int]string, len(batch))
+		for _, mi := range batch {
+			pathByID[mi.id] = mi.path
+		}
+		for _, row := range rows {
+			if err := os.WriteFile(pathByID[row.ID], row.Imgdata, 0644); err != nil {
+				log.Print(err)
+			}
 		}
 	}
 	return nil
