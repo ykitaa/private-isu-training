@@ -523,3 +523,39 @@ Go 側のグループ化ループ（`allComments || len < 3`）はそのまま�
 ### 効果
 
 一覧系の `makePosts` で **コメント転送量を「投稿あたり全件 → 最大3件」** に削減。コメントの多い投稿が多数あるほど DB→app の転送とメモリ確保を圧縮。
+
+---
+
+## PR#19: 計測基盤の構築（alp / pt-query-digest / pprof） (2026-06-23)
+
+**ブランチ:** `fix/session-user-cache`
+**対象ファイル:** `private_isu/webapp/etc/nginx/conf.d/default.conf`, `private_isu/webapp/etc/mysql/conf.d/tuning.cnf`（新規）, `MEASUREMENT.md`（新規）
+
+> 補足（同日修正）: nginx の LTSV ログ定義は **EC2 の `/etc/nginx/nginx.conf`（http{}）側で運用済み**だったため、
+> リポジトリ `default.conf` での `log_format`/`access_log` 定義は**取りやめた**（同名 `log_format ltsv` の二重定義で
+> `nginx -t` が `duplicate log format` で落ちるのを防ぐため）。`default.conf` には「ここでは再定義しない」旨をコメントで明記。
+
+### 背景
+
+参考記事との差分分析（`IMPROVEMENT_PLAN.md`）で、本リポジトリは pprof しか計測手段が無く、
+**nginx アクセスログ解析（alp）と MySQL スローログ解析の土台が無い**ことが最大の差分（🔴最優先）と判明。
+以降の施策の効果を「推測ではなく計測」で判断できるよう、計測基盤を先に整備した。
+
+### 実施内容
+
+| 対象 | 内容 |
+|---|---|
+| nginx | alp 用の **LTSV `log_format` + `access_log`** は EC2 の `/etc/nginx/nginx.conf`（http{}）で運用。リポジトリ `default.conf` 側は二重定義を避けるため再定義せず、その旨をコメント明記。本番走行では `access_log off;` に切り替える運用は `MEASUREMENT.md` に記載 |
+| MySQL (`etc/mysql/conf.d/tuning.cnf` 新規) | **スロークエリログ**（`slow_query_log=1` / `long_query_time=0` / `mysql-slow.log`）＋ `innodb_buffer_pool_size=1G` ほか。EC2 への配置先・反映手順をコメント記載 |
+| 手順書 (`MEASUREMENT.md` 新規) | alp / pt-query-digest / pprof のインストール・ログローテート・集計コマンド・見るポイントを記載。計測の基本ループ（ローテート→ベンチ→集計→施策→再計測）と、本番走行時のログ停止注意も明記 |
+
+### 注意
+
+- nginx の `log_format` は conf.d が http{} 配下に include される前提で `default.conf` 冒頭に定義（標準 nginx.conf 構成で有効）。
+- `tuning.cnf` は **EC2 側に手動配置**が必要（compose は Ruby ビルドのため本番経路ではない）。配置先・restart 手順は `MEASUREMENT.md` 参照。
+- `long_query_time=0` は全クエリ記録で重いため、**計測時のみ**有効化し本番走行では止める。
+
+### 効果
+
+ボトルネックをエンドポイント別（alp）・クエリ別（pt-query-digest）・関数別（pprof）に定量把握できるようになり、
+今後の施策（makePosts 結果キャッシュ等）を効果測定の上で判断できる土台が整った。

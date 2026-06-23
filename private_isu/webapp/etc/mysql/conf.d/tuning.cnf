@@ -1,0 +1,30 @@
+# MySQL 計測 & チューニング設定（private-isu）
+#
+# 配置先（EC2 直デプロイ運用）:
+#   - Ubuntu/apt の MySQL: /etc/mysql/mysql.conf.d/ もしくは /etc/mysql/conf.d/ に置く
+#   - 反映: sudo systemctl restart mysql
+#   - 確認: mysql -e "SHOW VARIABLES LIKE 'slow_query_log'; SHOW VARIABLES LIKE 'innodb_buffer_pool_size';"
+#
+# Docker compose で使う場合（任意）: compose.yml の mysql に
+#   volumes: - ./etc/mysql/conf.d:/etc/mysql/conf.d
+# を追加する。slow_query_log_file の出力先ディレクトリが書き込み可能であること。
+
+[mysqld]
+
+# ---- スロークエリログ（計測時のみ有効化）----
+# pt-query-digest / mysqldumpslow で集計する。long_query_time=0 で全クエリを記録するため重い。
+# 計測が終わったら slow_query_log = 0 に戻すか long_query_time を引き上げること。
+slow_query_log          = 1
+slow_query_log_file     = /var/log/mysql/mysql-slow.log
+long_query_time         = 0
+# インデックス未使用クエリも記録したい場合は 1 にする（ノイズが増える）
+log_queries_not_using_indexes = 0
+
+# ---- InnoDB バッファプール ----
+# メモリに載るデータ量を増やしディスク I/O を削減する。
+# 同居構成なら物理メモリの 5〜7 割程度を目安に。compose の 1g 制限環境なら 512M 程度。
+innodb_buffer_pool_size = 1G
+
+# 書き込み耐久性を多少犠牲にして I/O を減らす（ベンチ用。データ消失許容前提）。
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method            = O_DIRECT
