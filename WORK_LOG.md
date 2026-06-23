@@ -247,3 +247,61 @@ go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 # pprof 対話シェルで上位関数を確認
 (pprof) top10
 ```
+
+---
+
+## PR#7〜#10: 画像ダンプの安定化 (2026-06-23)
+
+**ブランチ:** `fix/nginx-static-and-db-pool`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+PR#6（nginx静的配信）で nginx から画像ファイルを直接配信するようにしたが、ファイル書き出し側に複数の不具合が判明し、段階的に修正した。
+
+### 問題と修正
+
+| 問題 | 症状 | 修正 |
+|---|---|---|
+| `image` ディレクトリが存在しない | `open ../public/image/9992.jpg: no such file or directory` で全書き込み失敗 | 書き出し前に `os.MkdirAll(imageDir, 0755)` |
+| `/initialize` 内で全画像をリクエストコンテキストで書き出し | ベンチの initialize タイムアウトで切断され `context canceled` | 書き出しを `dumpImages(context.Background())` に切り出し、リクエスト切断の影響を受けないように |
+| 毎回 全削除→全書き出し | initialize が遅い | `os.Stat` で**既存ファイルはスキップ**。ベース投稿(1〜10000)の画像は不変なので2回目以降はほぼ即時 |
+| 起動直後に画像が未展開 | 初回 initialize が重い | `main()` で**起動時に一度 `dumpImages`** を実行 |
+
+### 効果
+
+`/initialize` のタイムアウト由来の `context canceled` を解消し、2回目以降の initialize を高速化。
+
+---
+
+## 作業メモ: .gitignore に生成画像を追加 (2026-06-23)
+
+**対象ファイル:** `.gitignore`
+
+DB から書き出される画像は実行時生成物なので、リポジトリに含めないよう除外。
+
+```
+private_isu/webapp/public/image/
+```
+
+jpg/png/gif すべてを対象にするためディレクトリごと除外。
+
+---
+
+## PR#11: 画像ダンプのメモリ安全化（バッチ取得） (2026-06-23)
+
+**ブランチ:** `fix/dumpImages`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`dumpImages` が `SELECT id, mime, imgdata FROM posts` で**全画像（mediumblob 1万件）を一括メモリロード**していた。app コンテナは 1GB 制限のため、起動時ダンプでメモリスパイク→GC多発／スワップが起き、ベンチ実行中ずっと全体が遅くなり、各ハンドラで `context canceled` が多発していた。
+
+### 解決策
+
+2段階方式に変更:
+
+1. **`SELECT id, mime FROM posts`** で blob を含まない軽いメタ情報だけ取得し、ディスクに無いファイルを洗い出す
+2. 不足分の `imgdata` だけを **100件ずつバッチ**（`sqlx.In` の `IN(?)`）で取得して書き出す
+
+### 効果
+
+全 blob の一括メモリ確保を排除。**定常状態（全ファイル存在）では blob を1件も読まない**ため、起動時のメモリ圧迫と GC 由来の遅延を解消。
