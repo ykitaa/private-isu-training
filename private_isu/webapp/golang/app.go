@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"path"
@@ -926,6 +927,10 @@ func main() {
 	r.Post("/admin/banned", postAdminBanned)
 	r.Get(`/@{accountName:[0-9a-zA-Z_]+}`, getAccountName)
 	r.Mount("/", http.FileServer(http.Dir("../public")))
+
+	go func() {
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
