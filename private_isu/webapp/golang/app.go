@@ -226,9 +226,20 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 		commentCountMap[c.PostID] = c.Count
 	}
 
-	// コメントをまとめて取得（created_at DESC で全件取得し、Go側で post_id ごとに上位3件に絞る）
+	// コメントをまとめて取得。一覧表示では各 post の上位3件しか使わないため、
+	// ウィンドウ関数（ROW_NUMBER）で DB 側を 1 post あたり3件に絞り、転送量を抑える。
+	// 投稿単体ページ（allComments）は全件必要なので従来通り全件取得する。
 	var allCommentRows []Comment
-	q, args, err = sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC", postIDs)
+	if allComments {
+		q, args, err = sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC", postIDs)
+	} else {
+		q, args, err = sqlx.In(
+			"SELECT `id`, `post_id`, `user_id`, `comment`, `created_at` FROM ("+
+				"SELECT *, ROW_NUMBER() OVER (PARTITION BY `post_id` ORDER BY `created_at` DESC) AS `rn` "+
+				"FROM `comments` WHERE `post_id` IN (?)"+
+				") t WHERE `rn` <= 3 ORDER BY `created_at` DESC",
+			postIDs)
+	}
 	if err != nil {
 		return nil, err
 	}

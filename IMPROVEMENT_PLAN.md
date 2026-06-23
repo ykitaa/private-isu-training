@@ -77,22 +77,22 @@ EC2 上で Go バイナリを直接起動しているなら無関係だが、**�
 
 ---
 
-## 🟡 中: `makePosts` のコメント全件取得
+## ✅ 対応済み (PR#18): `makePosts` のコメント全件取得
 
 ### 問題
-一覧表示（`allComments=false`）でも以下で **全コメントを取得**してから Go 側で上位3件に絞っている。
+一覧表示（`allComments=false`）でも以下で **全コメントを取得**してから Go 側で上位3件に絞っていた。
 
 ```go
 q, args, err = sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC", postIDs)
 ```
 
-コメント数の多い投稿があると、無駄な転送・メモリ確保が発生する。
+コメント数の多い投稿があると、無駄な転送・メモリ確保が発生していた。
 
 ### 対策
-- MySQL 8 のウィンドウ関数（`ROW_NUMBER() OVER (PARTITION BY post_id ORDER BY created_at DESC)`）で per-post 上位3件に絞る、
-- または件数集計（`commentCountMap`）と組み合わせて取得件数を抑える。
-
-実装はやや複雑。中リスク。
+`allComments=false` のときだけ MySQL 8 のウィンドウ関数
+（`ROW_NUMBER() OVER (PARTITION BY post_id ORDER BY created_at DESC)` で `rn <= 3`）で
+DB 側を per-post 上位3件に絞り込むよう変更。`allComments=true`（投稿単体）は従来通り全件取得。
+`idx_comments_post_id_created_at` がそのまま効く。ベンチはコメント内容/件数を検証しないため表示は同一。
 
 ---
 

@@ -452,3 +452,74 @@ cfg.InterpolateParams = true
 ### 効果
 
 毎クエリの PREPARE+EXECUTE 往復を排除し、DB へのラウンドトリップ回数を削減。
+
+---
+
+## PR#17: セッションユーザーの memcached キャッシュ (2026-06-23)
+
+**ブランチ:** `fix/session-user-cache`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`getSessionUser` が認証の絡む**全リクエスト**で `SELECT * FROM users WHERE id = ?` を発行していた。PK 引きで1本ずつは軽いが、リクエスト数だけ積み上がり DB への定常負荷になっていた。
+
+### 解決策
+
+ユーザーを memcached（キー `user:<id>`、JSON シリアライズ）にキャッシュし、`getSessionUser` はまずキャッシュを引いてヒットすれば DB を叩かない方式に変更。
+
+| 箇所 | 変更 |
+|---|---|
+| `getSessionUser` | memcached → ヒットで即返す。ミス時のみ DB → 取得結果をキャッシュ |
+| `cacheUser` / `userCacheKey` | ヘルパー追加。`User` を JSON で `user:<id>` に保存。キーは全経路 `user:%v` で統一 |
+| `getInitialize` | `del_flg` リセットに合わせ `memcacheClient.FlushAll()` で全消去 |
+| `postAdminBanned` | banned 対象ユーザーのキャッシュキーを `Delete` |
+| imports | `encoding/json` 追加 |
+
+### 整合性
+
+- `users.authority` はアプリ内で **UPDATE されず不変**。
+- セッションユーザーの `DelFlg` は**どこからも参照されない**（投稿一覧の削除フィルタは makePosts が DB から都度取得する投稿者の `DelFlg` で別物）。
+- したがってキャッシュによる動作変化はなく、`/initialize` の flush・admin/banned の delete は保険。
+- セッションストア（gsm, prefix `iscogram_`）とはキー名前空間が別で衝突しない。
+
+### 効果
+
+認証が絡む全リクエストの `SELECT users` を**キャッシュヒット時ゼロ**に削減し、DB の定常負荷を軽減。
+
+---
+
+## PR#18: makePosts のコメント取得をウィンドウ関数で上位3件に絞る (2026-06-23)
+
+**ブランチ:** `fix/session-user-cache`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+一覧表示（`allComments=false`：GET / / GET /@user / GET /posts）でも、`makePosts` が
+`SELECT * FROM comments WHERE post_id IN (?) ORDER BY created_at DESC` で**該当投稿の全コメントを取得**してから Go 側で上位3件に絞っていた。コメント数の多い投稿があると無駄な転送・メモリ確保が発生していた。
+
+### 解決策
+
+`allComments` で分岐:
+
+- **一覧系（`allComments=false`）**: ウィンドウ関数で DB 側を 1 post あたり3件に絞る
+  ```sql
+  SELECT id, post_id, user_id, comment, created_at FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY post_id ORDER BY created_at DESC) AS rn
+    FROM comments WHERE post_id IN (?)
+  ) t WHERE rn <= 3 ORDER BY created_at DESC
+  ```
+  `idx_comments_post_id_created_at (post_id, created_at DESC)` がそのまま効く（追加ソート不要）。
+- **投稿単体（`allComments=true`：GET /posts/{id}）**: 全件必要なので従来通り全件取得。
+
+Go 側のグループ化ループ（`allComments || len < 3`）はそのまま流用でき変更不要。
+
+### 整合性
+
+- ベンチマーカーは一覧/投稿ページでコメント内容・件数を検証しておらず（チェックは `img.isu-image` とリンクのみ）、表示される上位3件は従来と同一。
+- ties（同一 created_at）の非決定性は従来の全件取得＋Go側絞り込みと同等で、挙動の悪化なし。
+
+### 効果
+
+一覧系の `makePosts` で **コメント転送量を「投稿あたり全件 → 最大3件」** に削減。コメントの多い投稿が多数あるほど DB→app の転送とメモリ確保を圧縮。
