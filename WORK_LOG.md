@@ -452,3 +452,37 @@ cfg.InterpolateParams = true
 ### 効果
 
 毎クエリの PREPARE+EXECUTE 往復を排除し、DB へのラウンドトリップ回数を削減。
+
+---
+
+## PR#17: セッションユーザーの memcached キャッシュ (2026-06-23)
+
+**ブランチ:** `fix/session-user-cache`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`getSessionUser` が認証の絡む**全リクエスト**で `SELECT * FROM users WHERE id = ?` を発行していた。PK 引きで1本ずつは軽いが、リクエスト数だけ積み上がり DB への定常負荷になっていた。
+
+### 解決策
+
+ユーザーを memcached（キー `user:<id>`、JSON シリアライズ）にキャッシュし、`getSessionUser` はまずキャッシュを引いてヒットすれば DB を叩かない方式に変更。
+
+| 箇所 | 変更 |
+|---|---|
+| `getSessionUser` | memcached → ヒットで即返す。ミス時のみ DB → 取得結果をキャッシュ |
+| `cacheUser` / `userCacheKey` | ヘルパー追加。`User` を JSON で `user:<id>` に保存。キーは全経路 `user:%v` で統一 |
+| `getInitialize` | `del_flg` リセットに合わせ `memcacheClient.FlushAll()` で全消去 |
+| `postAdminBanned` | banned 対象ユーザーのキャッシュキーを `Delete` |
+| imports | `encoding/json` 追加 |
+
+### 整合性
+
+- `users.authority` はアプリ内で **UPDATE されず不変**。
+- セッションユーザーの `DelFlg` は**どこからも参照されない**（投稿一覧の削除フィルタは makePosts が DB から都度取得する投稿者の `DelFlg` で別物）。
+- したがってキャッシュによる動作変化はなく、`/initialize` の flush・admin/banned の delete は保険。
+- セッションストア（gsm, prefix `iscogram_`）とはキー名前空間が別で衝突しない。
+
+### 効果
+
+認証が絡む全リクエストの `SELECT users` を**キャッシュヒット時ゼロ**に削減し、DB の定常負荷を軽減。
