@@ -13,3 +13,6 @@ backup/
 .wget-hsts
 .gitconfig
 go/*
+
+# DBから書き出される画像ファイル（実行時生成物）
+private_isu/webapp/public/image/
