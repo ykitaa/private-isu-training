@@ -179,6 +179,48 @@ EOF
 
 ---
 
+## PR#6: nginx静的配信 + DBコネクションプール (2026-06-23)
+
+**ブランチ:** `fix/nginx-static-and-db-pool`
+**対象ファイル:** `private_isu/webapp/etc/nginx/conf.d/default.conf`, `private_isu/webapp/golang/app.go`
+
+### 問題
+
+1. nginx が全リクエスト（画像・css・js含む）を Go にプロキシするだけで、PR#5 でファイル化した画像も `http.ServeFile` 経由で Go を通っていた。画像リクエストはトラフィックの大半を占めるため最大のボトルネック。
+2. `main()` で DB コネクションプールを未設定。Go デフォルトの `MaxIdleConns=2` により高並列時にコネクション張り直しが多発。
+
+### 解決策
+
+**nginx (`default.conf`):**
+
+| 項目 | 内容 |
+|---|---|
+| `/image/` | `try_files $uri @app` でファイルがあれば nginx 直接配信、無ければ app へフォールバック |
+| `/(css\|js\|img\|favicon)` | 同上で静的アセットを nginx 直接配信 |
+| `sendfile` / `tcp_nopush` / `open_file_cache` | 静的配信を高速化 |
+| `gzip` | HTML/CSS/JS/JSON を圧縮 |
+| `upstream app { keepalive 64 }` + `proxy_http_version 1.1` | app への接続を keepalive 化 |
+| `expires 1d` / `Cache-Control: public` | 静的ファイルにキャッシュヘッダ |
+
+**Go (`app.go`):**
+
+```go
+db.SetMaxOpenConns(100)
+db.SetMaxIdleConns(100)
+db.SetConnMaxLifetime(0)
+```
+
+### 効果
+
+- 画像・静的アセットのリクエストが **Go を経由せず nginx で完結**し、app の負荷を大幅削減
+- DB コネクションの張り直しが減り、高並列時のレイテンシが改善
+
+### 注意
+
+- nginx コンテナは `./public:/public` をマウント済み。Go が `../public/image` に書き出した画像は `/public/image/` として nginx から見える。EC2 直接デプロイ時は nginx の `root` が実際の public パスを指しているか要確認。
+
+---
+
 ## 作業メモ: pprof 導入 (2026-06-23)
 
 **対象ファイル:** `private_isu/webapp/golang/app.go`
