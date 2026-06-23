@@ -79,3 +79,62 @@ PR#1 の `makePosts` バッチ取得化が原因で、新たなボトルネッ�
 ### 備考
 
 スキーマファイルに直接記述することで、DB 再初期化後もインデックスが自動で適用される。
+
+---
+
+## PR#4: digest関数のシェル起動をcrypto/sha512に置き換え (2026-06-23)
+
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`digest` 関数がパスワードハッシュ計算のたびに `/bin/bash -c "... | openssl dgst -sha512 | sed ..."` をシェル起動していた。
+
+- `calculatePasshash` → `calculateSalt`（`digest` ×1）+ `digest` ×1 = **シェル2回起動 / リクエスト**
+- POST /login・POST /register のたびに発生しタイムアウトの原因になっていた
+
+### 解決策
+
+Go 標準ライブラリ `crypto/sha512` を使ったインメモリ計算に置き換え:
+
+```go
+func digest(src string) string {
+    h := sha512.Sum512([]byte(src))
+    return fmt.Sprintf("%x", h)
+}
+```
+
+- `os/exec` インポートと `escapeshellarg` 関数を削除
+- `calculateSalt` / `calculatePasshash` から不要になった `ctx` 引数を削除
+
+### 効果
+
+POST /login・POST /register のシェルプロセス起動が **2回 → 0回** に削減
+
+---
+
+## PR#5: 画像をDBから読まずファイル配信に切り替え (2026-06-23)
+
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`GET /image/{id}.{ext}` のたびに `SELECT * FROM posts WHERE id = ?` で **mediumblob をDB から読み込んでいた**。
+
+- インデックスページ表示1回 = 画像20枚 = DB クエリ20本 + 大量データ転送
+- 高並列時にDBへの最大の負荷源になっていた
+
+### 解決策
+
+1. **`getInitialize`**: 既存ファイルを削除し、DBの全画像をディスクに書き出す
+2. **`postIndex`**: 新規投稿時に DB への INSERT に加えてファイルにも保存
+3. **`getImage`**: DB クエリを廃止し `http.ServeFile` でファイル配信に変更
+4. **`imageDir`** 定数 (`../public/image`) と **`mimeToExt`** ヘルパーを追加
+
+### 備考
+
+ベンチマーカーは開始時に `/initialize` を自動で叩く（`benchmarker/cli.go:250`）ため、手動でのファイル展開は不要。
+
+### 効果
+
+画像リクエストごとの **DB クエリがゼロ** になり、DB への負荷を大幅削減

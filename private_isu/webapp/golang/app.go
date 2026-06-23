@@ -34,7 +34,20 @@ const (
 	postsPerPage  = 20
 	ISO8601Format = "2006-01-02T15:04:05-07:00"
 	UploadLimit   = 10 * 1024 * 1024 // 10mb
+	imageDir      = "../public/image"
 )
+
+func mimeToExt(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/gif":
+		return "gif"
+	}
+	return ""
+}
 
 type User struct {
 	ID          int       `db:"id"`
@@ -304,6 +317,35 @@ func getTemplPath(filename string) string {
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	dbInitialize(ctx)
+
+	// 既存の画像ファイルを一旦削除
+	entries, _ := os.ReadDir(imageDir)
+	for _, e := range entries {
+		os.Remove(imageDir + "/" + e.Name())
+	}
+
+	// DB の全画像をファイルに書き出す
+	type imageRow struct {
+		ID      int    `db:"id"`
+		Mime    string `db:"mime"`
+		Imgdata []byte `db:"imgdata"`
+	}
+	var images []imageRow
+	if err := db.SelectContext(ctx, &images, "SELECT `id`, `mime`, `imgdata` FROM `posts`"); err != nil {
+		log.Print(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	for _, img := range images {
+		ext := mimeToExt(img.Mime)
+		if ext == "" {
+			continue
+		}
+		if err := os.WriteFile(fmt.Sprintf("%s/%d.%s", imageDir, img.ID, ext), img.Imgdata, 0644); err != nil {
+			log.Print(err)
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -717,40 +759,19 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ext := mimeToExt(mime)
+	if err := os.WriteFile(fmt.Sprintf("%s/%d.%s", imageDir, pid, ext), filedata, 0644); err != nil {
+		log.Print(err)
+	}
+
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
 
 func getImage(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 	pidStr := r.PathValue("id")
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	post := Post{}
-	err = db.GetContext(ctx, &post, "SELECT * FROM `posts` WHERE `id` = ?", pid)
-	if err != nil {
-		log.Print(err)
-		return
-	}
-
 	ext := r.PathValue("ext")
-
-	if ext == "jpg" && post.Mime == "image/jpeg" ||
-		ext == "png" && post.Mime == "image/png" ||
-		ext == "gif" && post.Mime == "image/gif" {
-		w.Header().Set("Content-Type", post.Mime)
-		_, err := w.Write(post.Imgdata)
-		if err != nil {
-			log.Print(err)
-			return
-		}
-		return
-	}
-
-	w.WriteHeader(http.StatusNotFound)
+	filePath := fmt.Sprintf("%s/%s.%s", imageDir, pidStr, ext)
+	http.ServeFile(w, r, filePath)
 }
 
 func postComment(w http.ResponseWriter, r *http.Request) {
