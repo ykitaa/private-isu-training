@@ -138,3 +138,70 @@ POST /login・POST /register のシェルプロセス起動が **2回 → 0回**
 ### 効果
 
 画像リクエストごとの **DB クエリがゼロ** になり、DB への負荷を大幅削減
+
+---
+
+## 作業メモ: インデックスが EC2 DB に未適用だった (2026-06-23)
+
+### 発覚した問題
+
+PR#3 でスキーマファイルにインデックスを追加したが、EC2 の DB には反映されていなかった。
+
+**原因:** スキーマファイルへの変更は DROP TABLE → CREATE TABLE のフルリセット時にしか効かない。ベンチの `/initialize` は DELETE/UPDATE のみで DROP しないため、既存 DB にはインデックスが当たらない。
+
+```sql
+-- 確認コマンド
+sudo mysql isuconp -e "
+SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = 'isuconp'
+AND TABLE_NAME IN ('posts', 'comments')
+ORDER BY TABLE_NAME, INDEX_NAME;"
+-- → PRIMARY KEY しか存在しないことが判明
+```
+
+### 対処
+
+EC2 で手動 ALTER TABLE を実行:
+
+```bash
+sudo mysql isuconp << 'EOF'
+ALTER TABLE `posts` ADD INDEX `idx_posts_created_at` (`created_at` DESC);
+ALTER TABLE `posts` ADD INDEX `idx_posts_user_id_created_at` (`user_id`, `created_at` DESC);
+ALTER TABLE `comments` ADD INDEX `idx_comments_post_id_created_at` (`post_id`, `created_at` DESC);
+ALTER TABLE `comments` ADD INDEX `idx_comments_user_id` (`user_id`);
+EOF
+```
+
+### 教訓
+
+インデックス追加はスキーマファイルだけでなく、**本番 DB への ALTER TABLE も必ず実行する**。
+
+---
+
+## 作業メモ: pprof 導入 (2026-06-23)
+
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+`net/http/pprof` をブランクインポートし、ベンチに影響しないよう **ポート 6060** で別サーバーを起動。
+
+```go
+import _ "net/http/pprof"
+
+// main() 内
+go func() {
+    log.Println(http.ListenAndServe(":6060", nil))
+}()
+```
+
+### 使い方
+
+ベンチ実行中に EC2 上で:
+
+```bash
+# CPUプロファイル（30秒収集）
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+
+# pprof 対話シェルで上位関数を確認
+(pprof) top10
+```
