@@ -343,3 +343,35 @@ var (
 ### 効果
 
 リクエストごとのテンプレート再パース（ディスク I/O + パース CPU）が **毎回 → ゼロ** に削減。最頻出エンドポイントの GET / で特に効果が大きい。
+
+---
+
+## PR#13: getAccountName のクエリ集約 (2026-06-23)
+
+**ブランチ:** `fix/precompile-templates`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`getAccountName`（GET /@user）が以下の非効率なクエリを発行していた:
+
+1. `SELECT COUNT(*) FROM comments WHERE user_id = ?`（コメント数）
+2. `SELECT id FROM posts WHERE user_id = ?`（**全 post_id を Go 側に取得**）
+3. 2 の結果から `?` プレースホルダ文字列を手動連結し `[]int → []any` 変換して
+   `SELECT COUNT(*) FROM comments WHERE post_id IN (...)`
+
+2 で投稿 ID を全件メモリに読み込み、3 で文字列連結・型変換していたのが無駄。
+
+### 解決策
+
+| クエリ | 変更前 | 変更後 |
+|---|---|---|
+| 投稿数 | `SELECT id` を全件取得して `len()` | `SELECT COUNT(*) FROM posts WHERE user_id = ?`（行を materialize しない） |
+| 投稿へのコメント数 | アプリ側で IN プレースホルダを手動構築 | `... WHERE post_id IN (SELECT id FROM posts WHERE user_id = ?)` のサブクエリで集約 |
+
+- `posts.user_id`（`idx_posts_user_id_created_at`）/ `comments.post_id`（`idx_comments_post_id_created_at`）の各インデックスを利用
+- 手動の placeholder 連結・`[]int → []any` 変換を撤廃
+
+### 効果
+
+全 post_id のメモリ取得とアプリ側での文字列組み立てを排除。クエリも index-backed な集計のみになり、投稿数の多いユーザーで特に軽量化。

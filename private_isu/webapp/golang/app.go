@@ -602,6 +602,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ユーザーが書いたコメント数（comments.user_id インデックスを利用）
 	commentCount := 0
 	err = db.GetContext(ctx, &commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 	if err != nil {
@@ -609,29 +610,18 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	postIDs := []int{}
-	err = db.SelectContext(ctx, &postIDs, "SELECT `id` FROM `posts` WHERE `user_id` = ?", user.ID)
+	// 投稿数（全 id を取得せず COUNT で集計。posts.user_id インデックスを利用）
+	postCount := 0
+	err = db.GetContext(ctx, &postCount, "SELECT COUNT(*) AS count FROM `posts` WHERE `user_id` = ?", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
 	}
-	postCount := len(postIDs)
 
+	// ユーザーの投稿に付いたコメント総数（サブクエリで1クエリに集約）
 	commentedCount := 0
 	if postCount > 0 {
-		s := []string{}
-		for range postIDs {
-			s = append(s, "?")
-		}
-		placeholder := strings.Join(s, ", ")
-
-		// convert []int -> []any
-		args := make([]any, len(postIDs))
-		for i, v := range postIDs {
-			args[i] = v
-		}
-
-		err = db.GetContext(ctx, &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
+		err = db.GetContext(ctx, &commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN (SELECT `id` FROM `posts` WHERE `user_id` = ?)", user.ID)
 		if err != nil {
 			log.Print(err)
 			return
