@@ -375,3 +375,80 @@ var (
 ### 効果
 
 全 post_id のメモリ取得とアプリ側での文字列組み立てを排除。クエリも index-backed な集計のみになり、投稿数の多いユーザーで特に軽量化。
+
+---
+
+## PR#15: nginx⇔app 間を Unix ドメインソケット化 (2026-06-23)
+
+**ブランチ:** `fix/nginx-unix-socket`
+**対象ファイル:** `private_isu/webapp/golang/app.go`, `private_isu/webapp/etc/nginx/conf.d/default.conf`
+
+### 問題
+
+nginx⇔app 間が TCP（`server app:8080`）で接続されており、同一ホスト上でも TCP/loopback のオーバーヘッド（コネクション確立・パケット処理）が発生していた。
+
+### 解決策
+
+**Go (`app.go`):**
+
+環境変数 `ISUCONP_LISTEN_SOCKET` が設定されていれば Unix ドメインソケットで listen し、未設定なら従来通り TCP `:8080` にフォールバックする方式に変更（ローカル開発を壊さない）。
+
+```go
+if socketPath := os.Getenv("ISUCONP_LISTEN_SOCKET"); socketPath != "" {
+    os.Remove(socketPath) // 残存ソケットがあると bind 失敗するため削除
+    l, _ := net.Listen("unix", socketPath)
+    os.Chmod(socketPath, 0666) // nginx ワーカー（別ユーザー）から接続可能に
+    log.Fatal(http.Serve(l, r))
+}
+log.Fatal(http.ListenAndServe(":8080", r))
+```
+
+**nginx (`default.conf`):**
+
+```nginx
+upstream app {
+  server unix:/run/isuconp.sock;
+  keepalive 64;
+}
+```
+
+`proxy_http_version 1.1` / `Connection ""` は既存のまま（ソケットでも keepalive 有効）。
+
+### EC2 側で必要な設定
+
+- Go プロセス（systemd 等）に `ISUCONP_LISTEN_SOCKET=/run/isuconp.sock` を設定
+- Go 実行ユーザーが `/run/isuconp.sock` を作成できる権限が必要。書けない場合は `/run/isuconp/` を tmpfiles.d で用意するか `/tmp/isuconp.sock` に変更（nginx 側のパスも合わせる）
+- SELinux/AppArmor 環境ではソケット接続が拒否される場合あり
+- 反映: `nginx -t && systemctl reload nginx` + Go 再起動
+
+### 効果
+
+nginx⇔app 間の TCP/loopback オーバーヘッドを排除し、高並列時のレイテンシを改善。
+
+---
+
+## PR#16: DSN に interpolateParams=true を追加 (2026-06-23)
+
+**ブランチ:** `fix/interpolateParams`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+go-sql-driver/mysql はデフォルトでプレースホルダ付きクエリを**サーバーサイドプリペアドステートメント**として実行しており、1クエリにつき `PREPARE` → `EXECUTE` → （暗黙の）`CLOSE` の複数ラウンドトリップが発生していた。makePosts / getSessionUser など高頻度クエリで往復コストが積み上がる。
+
+### 解決策
+
+DSN 設定に1行追加し、ドライバがクライアント側でプレースホルダを安全に展開（エスケープ）して1回のテキストプロトコルクエリで送信するように変更:
+
+```go
+cfg.InterpolateParams = true
+```
+
+### 備考
+
+- ドライバが charset を考慮して値をエスケープするため **SQL インジェクション安全性は維持**される（自前の文字列連結とは別物）。
+- `multiStatements=true` とは併用不可だが本アプリは未使用のため影響なし。`LOAD DATA LOCAL INFILE` も未使用。
+
+### 効果
+
+毎クエリの PREPARE+EXECUTE 往復を排除し、DB へのラウンドトリップ回数を削減。

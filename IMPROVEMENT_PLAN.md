@@ -4,6 +4,7 @@
 対象: `private_isu/webapp/golang/app.go` ほか
 
 PR#1〜#11 で DB 層（N+1・インデックス・フルスキャン解消）、画像のファイル配信、nginx 静的配信、DB コネクションプール、sha512 化、画像ダンプ安定化まで対応済み。
+さらに PR#12〜#16 で、テンプレート事前パース・getAccountName クエリ集約・nginx⇔app の Unix ソケット化・DSN の interpolateParams 化まで対応済み。
 残るボトルネックは **アプリ層（Go）の CPU 浪費** と **設定面** が中心。優先度順に以下へまとめる。
 
 ---
@@ -37,6 +38,28 @@ var indexTmpl = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles
 ```
 
 **低リスク・高効果。今いちばん効く改善の見込み。**
+
+---
+
+## ✅ 対応済み (PR#15): nginx⇔app 間を Unix ドメインソケット化
+
+### 問題
+nginx⇔app 間が TCP（`server app:8080`）接続で、同一ホストでも TCP/loopback のオーバーヘッドが発生していた。
+
+### 対策
+Go を `ISUCONP_LISTEN_SOCKET` 指定時に Unix ソケットで listen させ（未設定時は TCP :8080 にフォールバック）、nginx の upstream を `server unix:/run/isuconp.sock` に変更。あわせて gzip / upstream keepalive / 静的ファイルの Cache-Control は PR#6 で対応済みであることを確認。
+
+> EC2 では Go プロセスに `ISUCONP_LISTEN_SOCKET=/run/isuconp.sock` を設定し、`/run` への書き込み権限と nginx ユーザーからの到達性を要確認。
+
+---
+
+## ✅ 対応済み (PR#16): DSN の interpolateParams 化
+
+### 問題
+go-sql-driver/mysql がデフォルトでプレースホルダ付きクエリをサーバーサイドプリペアドステートメント実行しており、毎クエリ `PREPARE`+`EXECUTE` の往復が発生していた。
+
+### 対策
+`cfg.InterpolateParams = true` を追加し、クライアント側でプレースホルダを安全に展開して1回のクエリ送信に集約。SQL インジェクション安全性は維持。
 
 ---
 
@@ -135,12 +158,11 @@ memcached によるユーザーキャッシュ。ただし del_flg 更新（admi
 
 ---
 
-## 推奨着手順
+## 推奨着手順（残課題）
 
-1. **テンプレート事前パース**（最優先 / 低リスク・高効果）
-2. **regexp 事前コンパイル**（小粒・ついで対応可）
-3. **getAccountName のクエリ集約**
-4. **makePosts のコメント取得最適化**
-5. MySQL チューニング / セッションユーザーキャッシュ（インフラ・任意）
+1. **regexp 事前コンパイル**（小粒・低リスク）
+2. **makePosts のコメント取得最適化**（一覧でも全件取得 → ウィンドウ関数等で上位3件に）
+3. MySQL チューニング（`innodb_buffer_pool_size` 等の my.cnf）
+4. セッションユーザーキャッシュ（memcached・del_flg 整合に注意・任意）
 
-> ※ compose.yml の `context: ruby/` 問題は、Compose 運用なら最優先で確認すること。
+> ※ EC2 直接デプロイ運用のため compose.yml の `context: ruby/` 問題は実害なし（Compose 運用に切り替える場合のみ要対応）。
