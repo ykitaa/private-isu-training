@@ -909,6 +909,11 @@ func main() {
 	}
 	defer db.Close()
 
+	// コネクションプールを調整し、高並列時のコネクション張り直しを抑制する
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(100)
+	db.SetConnMaxLifetime(0)
+
 	r := chi.NewRouter()
 
 	r.Get("/initialize", getInitialize)
