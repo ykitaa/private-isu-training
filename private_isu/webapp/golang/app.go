@@ -34,10 +34,14 @@ var (
 )
 
 const (
-	postsPerPage  = 20
-	ISO8601Format = "2006-01-02T15:04:05-07:00"
-	UploadLimit   = 10 * 1024 * 1024 // 10mb
-	imageDir      = "../public/image"
+	postsPerPage = 20
+	// 投稿一覧（getIndex / getPosts）の取得件数。削除ユーザーの投稿は makePosts が app 側で除外し
+	// postsPerPage(20) 件で打ち切るため、除外ぶんを見込んで多めに取得する。削除ユーザーは全体の約2%なので
+	// 60 件取れば 20 件は確実に埋まる。JOIN を外し idx_posts_created_at だけで読めるようにするのが狙い。
+	listFetchLimit = 60
+	ISO8601Format  = "2006-01-02T15:04:05-07:00"
+	UploadLimit    = 10 * 1024 * 1024 // 10mb
+	imageDir       = "../public/image"
 )
 
 func mimeToExt(mime string) string {
@@ -590,7 +594,9 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err := db.SelectContext(ctx, &results, "SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` AND u.`del_flg` = 0 ORDER BY p.`created_at` DESC LIMIT ?", postsPerPage)
+	// JOIN を外し idx_posts_created_at で新しい順に読む。削除ユーザーの除外は makePosts に任せ、
+	// 除外ぶんを見込んで多めに取得する（makePosts が 20 件で打ち切る）。
+	err := db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` ORDER BY `created_at` DESC LIMIT ?", listFetchLimit)
 	if err != nil {
 		log.Print(err)
 		return
@@ -698,7 +704,8 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.SelectContext(ctx, &results, "SELECT p.`id`, p.`user_id`, p.`body`, p.`mime`, p.`created_at` FROM `posts` p JOIN `users` u ON p.`user_id` = u.`id` AND u.`del_flg` = 0 WHERE p.`created_at` <= ? ORDER BY p.`created_at` DESC LIMIT ?", t.Format(ISO8601Format), postsPerPage)
+	// getIndex 同様 JOIN を外し idx_posts_created_at の範囲スキャンで読む。削除ユーザー除外は makePosts。
+	err = db.SelectContext(ctx, &results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC LIMIT ?", t.Format(ISO8601Format), listFetchLimit)
 	if err != nil {
 		log.Print(err)
 		return

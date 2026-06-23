@@ -559,3 +559,59 @@ Go 側のグループ化ループ（`allComments || len < 3`）はそのまま�
 
 ボトルネックをエンドポイント別（alp）・クエリ別（pt-query-digest）・関数別（pprof）に定量把握できるようになり、
 今後の施策（makePosts 結果キャッシュ等）を効果測定の上で判断できる土台が整った。
+
+---
+
+## PR#20: 投稿一覧クエリの JOIN を外しフルスキャン+filesort を解消 (2026-06-23)
+
+**ブランチ:** `fix/posts-list-drop-join`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題（pt-query-digest で特定）
+
+計測（PR#19）の結果、スローログ上位2クエリ（getIndex / getPosts の投稿一覧）が**全体の約90%**を占めていた。
+
+```
+# Rank Response time         Calls  R/Call   Item
+#    1 282.5s 69.6%          1026   0.2754s  SELECT posts JOIN users ... ORDER BY created_at DESC LIMIT 20
+#    2  80.3s 19.8%           250   0.3214s  SELECT posts JOIN users ... WHERE created_at <= ? ...
+```
+
+`EXPLAIN` で原因が判明:
+
+```
+table: u  type: ALL    Extra: Using where; Using temporary; Using filesort   (users を全件スキャン)
+table: p  type: ref    key: idx_posts_user_id_created_at                      (各ユーザーの投稿を取得)
+```
+
+オプティマイザが **users を駆動表に選び、全ユーザーの投稿をかき集めてから temporary + filesort で全件ソート**して
+LIMIT 20 していた。**20 件返すのに毎回約1万行スキャン**（`idx_posts_created_at` は不使用）。
+PR#2 で追加した `JOIN users ... del_flg = 0` が、この非効率プランを誘発していた。
+
+### 解決策
+
+投稿一覧から **JOIN を外し、単一テーブルの `ORDER BY created_at DESC LIMIT ?`** にした。
+
+- `idx_posts_created_at` で新しい順に必要数だけ読んで早期終了（filesort なし）。
+- 削除ユーザーの除外は **makePosts が従来通り app 側で実施**（`p.User.DelFlg == 0` で除外し postsPerPage=20 で打ち切り）。private-isu オリジナル実装と同じ方式。
+- 削除ユーザーは全体の約2%なので、除外ぶんを見込み `listFetchLimit = 60` 件取得（チェッカーは1ページ20枚以上を要求するため、確実に20件埋まるバッファ）。
+
+| 箇所 | 変更前 | 変更後 |
+|---|---|---|
+| `getIndex` | `posts p JOIN users u ON ... del_flg=0 ORDER BY p.created_at DESC LIMIT 20` | `posts ORDER BY created_at DESC LIMIT 60` |
+| `getPosts` | 同上＋`WHERE p.created_at <= ?` | `posts WHERE created_at <= ? ORDER BY created_at DESC LIMIT 60` |
+| 定数 | — | `listFetchLimit = 60` を追加 |
+
+### 検証
+
+デプロイ前に EXPLAIN で `key: idx_posts_created_at` / `Extra: NULL`（filesort 消失）/ `rows` が数十程度になることを確認。
+デプロイ後はベンチ再実行 → スローログで Query1/2 が上位から消えることを確認する。
+
+### 備考
+
+makePosts に渡る件数が 20→60 になるため、コメント取得（PR#18 のウィンドウ関数 IN 句）の対象が約3倍に増える。
+ただし元が全体の 2.2% と小さく、解消する 90% に対して十分小さい。必要なら `listFetchLimit` を下げて調整可能。
+
+### 効果（見込み）
+
+DB 時間の約90%を占めていた投稿一覧クエリのスキャン行数を **約1万行 → 数十行** に削減。
