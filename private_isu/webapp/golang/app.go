@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
@@ -973,6 +974,24 @@ func main() {
 	go func() {
 		log.Println(http.ListenAndServe(":6060", nil))
 	}()
+
+	// ISUCONP_LISTEN_SOCKET が設定されていれば nginx⇔app 間を Unix ドメインソケットで繋ぎ、
+	// TCP/loopback のオーバーヘッドを避ける。未設定ならば従来通り TCP :8080 で listen する。
+	if socketPath := os.Getenv("ISUCONP_LISTEN_SOCKET"); socketPath != "" {
+		// 前回のソケットファイルが残っていると bind に失敗するため削除しておく
+		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("failed to remove existing socket %s: %s", socketPath, err)
+		}
+		l, err := net.Listen("unix", socketPath)
+		if err != nil {
+			log.Fatalf("Failed to listen on unix socket %s: %s", socketPath, err.Error())
+		}
+		// nginx ワーカー（別ユーザー）から接続できるようにパーミッションを緩める
+		if err := os.Chmod(socketPath, 0666); err != nil {
+			log.Printf("failed to chmod socket %s: %s", socketPath, err)
+		}
+		log.Fatal(http.Serve(l, r))
+	}
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
