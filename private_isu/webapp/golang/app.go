@@ -926,6 +926,11 @@ func main() {
 	db.SetMaxIdleConns(100)
 	db.SetConnMaxLifetime(0)
 
+	// 起動時に画像をディスクへ書き出しておき、/initialize を高速化する
+	if err := dumpImages(context.Background()); err != nil {
+		log.Print(err)
+	}
+
 	r := chi.NewRouter()
 
 	r.Get("/initialize", getInitialize)
