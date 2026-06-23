@@ -176,43 +176,93 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 }
 
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+	if len(results) == 0 {
+		return nil, nil
+	}
 
+	postIDs := make([]int, len(results))
+	for i, p := range results {
+		postIDs[i] = p.ID
+	}
+
+	// コメント数をまとめて取得
+	type commentCount struct {
+		PostID int `db:"post_id"`
+		Count  int `db:"count"`
+	}
+	var counts []commentCount
+	q, args, err := sqlx.In("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.SelectContext(ctx, &counts, q, args...); err != nil {
+		return nil, err
+	}
+	commentCountMap := make(map[int]int, len(counts))
+	for _, c := range counts {
+		commentCountMap[c.PostID] = c.Count
+	}
+
+	// コメントをまとめて取得（created_at DESC で全件取得し、Go側で post_id ごとに上位3件に絞る）
+	var allCommentRows []Comment
+	q, args, err = sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `created_at` DESC", postIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.SelectContext(ctx, &allCommentRows, q, args...); err != nil {
+		return nil, err
+	}
+
+	// post_id ごとにコメントをグループ化（DESC 順のまま蓄積）
+	commentsMap := make(map[int][]Comment)
+	for _, c := range allCommentRows {
+		if allComments || len(commentsMap[c.PostID]) < 3 {
+			commentsMap[c.PostID] = append(commentsMap[c.PostID], c)
+		}
+	}
+
+	// posts + comments に登場するユーザーをまとめて取得
+	userIDSet := make(map[int]struct{})
 	for _, p := range results {
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
-		}
+		userIDSet[p.UserID] = struct{}{}
+	}
+	for _, c := range allCommentRows {
+		userIDSet[c.UserID] = struct{}{}
+	}
+	userIDs := make([]int, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.SelectContext(ctx, &comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
+	var users []User
+	q, args, err = sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err = db.SelectContext(ctx, &users, q, args...); err != nil {
+		return nil, err
+	}
+	userMap := make(map[int]User, len(users))
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
 
-		for i := range comments {
-			err := db.GetContext(ctx, &comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
-			}
-		}
+	// 組み立て
+	var posts []Post
+	for _, p := range results {
+		p.CommentCount = commentCountMap[p.ID]
 
-		// reverse
+		comments := commentsMap[p.ID]
+		// DESC → ASC に反転して表示順にする
 		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
 			comments[i], comments[j] = comments[j], comments[i]
 		}
-
+		for i := range comments {
+			comments[i].User = userMap[comments[i].UserID]
+		}
 		p.Comments = comments
 
-		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
+		p.User = userMap[p.UserID]
 		p.CSRFToken = csrfToken
 
 		if p.User.DelFlg == 0 {
