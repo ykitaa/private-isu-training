@@ -17,7 +17,9 @@ CREATE TABLE posts (
   `mime` varchar(64) NOT NULL,
   `imgdata` mediumblob NOT NULL,
   `body` text NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_posts_created_at` (`created_at` DESC),
+  INDEX `idx_posts_user_id_created_at` (`user_id`, `created_at` DESC)
 ) DEFAULT CHARSET=utf8mb4;
 
 DROP TABLE IF EXISTS comments;
@@ -26,5 +28,7 @@ CREATE TABLE comments (
   `post_id` int NOT NULL,
   `user_id` int NOT NULL,
   `comment` text NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_comments_post_id_created_at` (`post_id`, `created_at` DESC),
+  INDEX `idx_comments_user_id` (`user_id`)
 ) DEFAULT CHARSET=utf8mb4;
