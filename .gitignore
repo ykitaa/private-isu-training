@@ -1,0 +1,14 @@
+# 不要な隠しフォルダ・ファイルをまとめて除外
+.ansible/
+.bundle/
+.cache/
+.config/
+.local/
+.npm/
+.ssh/
+.vscode-server/
+.xbuild/
+backup/
+.bash_history
+.wget-hsts
+.gitconfig
