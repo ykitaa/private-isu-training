@@ -12,3 +12,4 @@ backup/
 .bash_history
 .wget-hsts
 .gitconfig
+go/*
