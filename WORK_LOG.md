@@ -305,3 +305,41 @@ jpg/png/gif すべてを対象にするためディレクトリごと除外。
 ### 効果
 
 全 blob の一括メモリ確保を排除。**定常状態（全ファイル存在）では blob を1件も読まない**ため、起動時のメモリ圧迫と GC 由来の遅延を解消。
+
+---
+
+## PR#12: HTMLテンプレートの事前パース (2026-06-23)
+
+**ブランチ:** `fix/precompile-templates`
+**対象ファイル:** `private_isu/webapp/golang/app.go`
+
+### 問題
+
+`getIndex` / `getAccountName` / `getPosts` / `getPostsID` / `getLogin` / `getRegister` / `getAdminBanned` のすべてが、**リクエストのたびに** `template.Must(template.ParseFiles(...))` を実行していた。
+
+- HTML テンプレートファイルを毎回ディスクから読み込み・パースしており、CPU と I/O を浪費
+- 特に最頻出の GET / は毎回 4 ファイル（layout/index/posts/post）を読み込んでいた
+
+### 解決策
+
+テンプレートを **起動時に一度だけパース**して package 変数に保持し、ハンドラでは `Execute` のみ呼ぶ方式に変更:
+
+```go
+var templFuncMap = template.FuncMap{"imageURL": imageURL}
+
+var (
+    loginTmpl    = template.Must(template.ParseFiles(...))
+    registerTmpl = template.Must(template.ParseFiles(...))
+    bannedTmpl   = template.Must(template.ParseFiles(...))
+    indexTmpl    = template.Must(template.New("layout.html").Funcs(templFuncMap).ParseFiles(...))
+    accountTmpl  = template.Must(template.New("layout.html").Funcs(templFuncMap).ParseFiles(...))
+    postsTmpl    = template.Must(template.New("posts.html").Funcs(templFuncMap).ParseFiles(...))
+    postIDTmpl   = template.Must(template.New("layout.html").Funcs(templFuncMap).ParseFiles(...))
+)
+```
+
+各ハンドラ内の `fmap` 定義と `template.Must(template.ParseFiles(...))` 呼び出しを削除し、対応する package 変数の `.Execute(w, ...)` に置き換えた。
+
+### 効果
+
+リクエストごとのテンプレート再パース（ディスク I/O + パース CPU）が **毎回 → ゼロ** に削減。最頻出エンドポイントの GET / で特に効果が大きい。
